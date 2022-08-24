@@ -31,8 +31,8 @@ btqdm = partial(tqdm, unit="batch", desc="Batch loop", leave=False)
 
 
 class TorchModel:
-    """Class-wrapper for torch models."""
-    def __init__(self, model, optimizer, criterion, metrics=None, callback=None):
+    """The class providing train/inference interface for Torch models."""
+    def __init__(self, model, optimizer, criterion, metrics=None, callback=None, profiler=None):
         if hasattr(criterion, "reduction"):
             criterion.reduction = "sum"
 
@@ -49,87 +49,87 @@ class TorchModel:
             self.device = torch.device("cuda:0")
             if cuda.device_count() > 1:
                 model = nn.DataParallel(model)
-        # elif mps.is_available():
-        #     self.device = torch.device("mps")
         else:
             self.device = torch.device("cpu")
 
         self.optimizer = optimizer
         self.criterion = criterion
         self.callback = callback if callback is not None else DefaultCallback()
+        self.profiler = profiler
 
         self.model = self.to_device(model)
         self.metrics = self.to_device(metrics)
-        self.loss = self.to_device(torch.zeros(2))
 
     def train(self, trn_loader, val_loader, epochs=1):
-        with self.callback as callback:
+        with self.callback as C:
 
             for epoch in etqdm(epochs):
                 trn_info = self._train(trn_loader)
                 val_info = self._validate(val_loader)
-                callback(self, trn_info, val_info, epoch)
+                C(self, trn_info, val_info, epoch)
 
         return trn_info, val_info
 
     def _train(self, loader):
-        self.model.train()  # criterion.train()?
+        with self.profiler as P:
 
-        for input, target in btqdm(loader):
-            input, target = self.to_device((input, target))
+            self.model.train()  # criterion.train()?
 
-            self.model.zero_grad()
-            output = self.model(input)
-            loss = self.criterion(output, target)
-            loss.backward()
-            self.optimizer.step()
+            for input, target in btqdm(loader):
+                input, target = self.to_device((input, target))
 
-            self._update_loss(loss)
-            self._update_metrics(output, target)
+                self.model.zero_grad()
+                output = self.model(input)
+                loss = self.criterion(output, target)
+                loss.backward()
+                self.optimizer.step()
 
-        loss = self._compute_and_reset_loss()
-        metrics = self._compute_and_reset_metrics()
+                self._update_loss(loss.detach())
+                self._update_metrics(output.detach(), target.detach())
+                P.step()
 
-        return loss, metrics
+            loss = self._compute_and_reset_loss()
+            metrics = self._compute_and_reset_metrics()
+
+        return {"loss": loss, "metrics": metrics}
 
     @torch.no_grad()
     def _validate(self, loader):
-        self.model.eval()
+        with self.profiler as P:
 
-        for input, target in loader:
-            input, target = self.to_device((input, target))
+            self.model.eval()
 
-            output = self.model(input)
-            loss = self.criterion(output, target)
+            for input, target in loader:
+                input, target = self.to_device((input, target))
 
-            self._update_loss(loss)
-            self._update_metrics(output, target)
+                output = self.model(input)
+                loss = self.criterion(output, target)
 
-        loss = self._compute_and_reset_loss()
-        metrics = self._compute_and_reset_metrics()
+                self._update_loss(loss.detach())
+                self._update_metrics(output.detach(), target.detach())
+                P.step()
 
-        return self.from_device((loss, metrics))
+            loss = self._compute_and_reset_loss()
+            metrics = self._compute_and_reset_metrics()
+
+        return {"loss": loss, "metrics": metrics}
 
     def _update_loss(self, loss):
-        self.loss += torch.stack([loss, torch.tensor(1.0).to(loss.device)])
-
-    def _reset_loss(self):
-        self.loss = torch.zeros(2, device=self.device)
+        if not hasattr(self, "loss"):
+            self.loss = torch.empty(0).to(self.device)
+        torch.cat((self.loss, loss.unsqueeze(0)))
 
     def _compute_and_reset_loss(self):
-        value = self.loss[0] / self.loss[1]
-        self._reset_loss()
+        value = self.loss.mean().cpu()
+        self.loss = torch.empty(0)
         return value
 
     def _update_metrics(self, output, target):
         self.metrics.update(output, target)
 
-    def _reset_metrics(self):
-        self.metrics.reset()
-
     def _compute_and_reset_metrics(self):
         values = self.metrics.compute()
-        self._reset_metrics()
+        self.metrics.reset()
         return values
 
     def test(self, tst_loader):
@@ -160,15 +160,13 @@ class TorchModel:
         ]
         return {module: getattr(self, module).state_dict() for module in modules}
 
-    def load_model(self, path_to_model):
-        self.model.load_state_dict(path_to_model)
-        return self
-
-    def load_optimizer(self, path_to_optimizer):
-        self.optimizer.load_state_dict(path_to_optimizer)
+    def load_state_dict(self, path):
+        for module_name, module_state_dict in torch.load(path):
+            getattr(self, module_name).load_state_dict(module_state_dict)
         return self
 
     def to_device(self, obj):
+        # TODO: *args.
         if isinstance(obj, (tuple, list)):
             return type(obj)(self.to_device(x) for x in obj)
 
@@ -181,6 +179,7 @@ class TorchModel:
         raise TypeError(f"Got: {type(obj)}")
 
     def from_device(self, obj):
+        # TODO: *args.
         if isinstance(obj, (tuple, list)):
             return type(obj)(self.from_device(x) for x in obj)
 
