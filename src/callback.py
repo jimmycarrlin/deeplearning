@@ -31,12 +31,6 @@ class CompositeCallback(Callback, Iterable):
     def __init__(self, children):
         self.children = children
 
-    def add(self, child):
-        self.children.append(child)
-
-    def remove(self, child):
-        self.children.remove(child)
-
     def __call__(self, torchmodel, trn_info, val_info, epoch):
         for child in self:
             child.__call__(torchmodel, trn_info, val_info, epoch)
@@ -81,10 +75,10 @@ class ClassificationReporter(SummaryWriter, Callback):
 class ObjDetReporter(SummaryWriter, Callback):
 
     def __call__(self, torchmodel, trn_info, val_info, epoch):
-        self.add_scalar("Loss/trn", trn_info[0], epoch)
-        self.add_scalar("Loss/val", val_info[0], epoch)
+        self.add_scalar("Loss/trn", trn_info["loss"], epoch)
+        self.add_scalar("Loss/val", val_info["loss"], epoch)
 
-        for (name, trn_value), (_, val_value) in zip(trn_info[1].items(), val_info[1].items()):
+        for (name, trn_value), (_, val_value) in zip(trn_info["metrics"].items(), val_info["metrics"].items()):
             self.add_scalar(f"{name}/trn", trn_value, epoch)
             self.add_scalar(f"{name}/val", val_value, epoch)
 
@@ -108,7 +102,7 @@ class Profiler(torch.profiler.profile, Callback):
 
     @classmethod
     def default(cls, log_dir):
-        schedule = torch.profiler.schedule(wait=1, warmup=1, active=1, repeat=2)
+        schedule = torch.profiler.schedule(wait=1, warmup=1, active=1, repeat=3)
         on_trace_ready = torch.profiler.tensorboard_trace_handler(log_dir)
         profile_memory = True
 
@@ -116,35 +110,26 @@ class Profiler(torch.profiler.profile, Callback):
 
 
 class Saver(Callback):
-    # TODO: making a directory to save.
-    # TODO: optimizer.state_dict(), lr_scheduler.state_dict().
+    # TODO: lr_scheduler.state_dict().
     """Primitive callback. Save last and best models."""
     def __init__(self, save_dir):
         self.save_dir = save_dir
         self.best_val_loss = float("inf")
 
     def __call__(self, torchmodel, _, val_info, __):
-        val_loss, *_ = val_info
-        self._backup(torchmodel)
-        self._best(torchmodel, val_loss)
+        val_loss = val_info["loss"]
+        state_dict = torchmodel.state_dict()
+        os.makedirs(self.save_dir, exist_ok=True)
+
+        torch.save(state_dict, self.save_dir / "torchmodel_last.pt")
+        if val_loss < self.best_val_loss:
+            torch.save(state_dict, self.save_dir / "torchmodel_best.pt")
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         pass
-
-    def _backup(self, torchmodel):
-        for module_name, module_state_dict in torchmodel.state_dict().items():
-            torch.save(module_state_dict, self.save_dir / f"backup_{module_name}.pt")
-
-    def _best(self, torchmodel, val_loss):
-        if val_loss >= self.best_val_loss:
-            return
-
-        self.best_val_loss = val_loss
-        for module_name, module_state_dict in torchmodel.state_dict().items():
-            torch.save(module_state_dict, self.save_dir / f"best_{module_name}.pt")
 
 
 class Tuner(Callback):
@@ -155,7 +140,7 @@ class Tuner(Callback):
             path = os.path.join(checkpoint_dir, "checkpoint")
             torch.save(torchmodel.model.state_dict(), torchmodel.optimizer.state_dict(), path)
 
-        tune.report(loss=val_info[0], accuracy=val_info[1][0])
+        tune.report(loss=val_info["loss"], accuracy=val_info["metrics"][0])
 
     def __enter__(self):
         return self
