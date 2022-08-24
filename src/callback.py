@@ -147,15 +147,3 @@ class Tuner(Callback):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         pass
-
-
-class DefaultCallback(Callback):
-    """Primitive callback. Do nothing."""
-    def __enter__(self):
-        pass
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-    def __call__(self, torchmodel, train_info, val_info, epoch):
-        pass
