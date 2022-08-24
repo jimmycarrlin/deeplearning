@@ -33,32 +33,16 @@ btqdm = partial(tqdm, unit="batch", desc="Batch loop", leave=False)
 class TorchModel:
     """The class providing train/inference interface for Torch models."""
     def __init__(self, model, optimizer, criterion, metrics=None, callback=None, profiler=None):
-        if hasattr(criterion, "reduction"):
-            criterion.reduction = "sum"
 
-        if metrics is None:
-            metrics = MetricCollection([])
-        else:
-            if isinstance(metrics, (tuple, list)):
-                metrics = MetricCollection(metrics)
-                for name, metric in metrics.items():
-                    if hasattr(metric, "top_k"):
-                        metric.top_k = metric.top_k or 1
-
-        if cuda.is_available():
-            self.device = torch.device("cuda:0")
-            if cuda.device_count() > 1:
-                model = nn.DataParallel(model)
-        else:
-            self.device = torch.device("cpu")
-
+        self.device = torch.device("cpu")
         self.optimizer = optimizer
         self.criterion = criterion
-        self.callback = callback if callback is not None else DefaultCallback()
-        self.profiler = profiler
+        self.model = model.to(self.device)
+        self.metrics = metrics.to(self.device)
 
-        self.model = self.to_device(model)
-        self.metrics = self.to_device(metrics)
+        self.profiler = profiler
+        self.metrics = metrics or MetricCollection([])
+        self.callback = callback or CompositeCallback([])
 
     def train(self, trn_loader, val_loader, epochs=1):
         with self.callback as C:
@@ -164,6 +148,16 @@ class TorchModel:
         for module_name, module_state_dict in torch.load(path):
             getattr(self, module_name).load_state_dict(module_state_dict)
         return self
+
+    def to(self, device):
+        self.device = torch.device(device, index=0)
+        self.model, self.metrics = self.model.to(self.device), self.metrics.to(self.device)
+
+    def cpu(self):
+        self.model, self.metrics = self.model.cpu(), self.metrics.cpu()
+
+    def detach(self):
+        self.model, self.metrics = self.model.detach(), self.metrics.detach()
 
     def to_device(self, obj):
         # TODO: *args.
